@@ -1,0 +1,10 @@
+# Example route for drive_waypoints.py, in the GMapping MAP frame:
+#   origin (0, 0, 0) = where the robot was when slam_gmapping started (x forward, y left).
+# Edit these after a first manual (teleop) mapping run: click "Publish Point" in RViz on the
+# places you want to visit and read the coordinates from `ros2 topic echo /clicked_point`.
+# Format: [x (m), y (m), yaw (rad)]
+waypoints:
+  - [1.5, 0.0, 0.0]
+  - [1.5, 1.5, 1.57]
+  - [0.0, 1.5, 3.14]
+  - [0.0, 0.0, -1.57]

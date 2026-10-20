@@ -1,0 +1,83 @@
+# =============================================================================
+#  GMapping (Rao-Blackwellised particle filter SLAM) - TurtleBot4 configuration
+#  ICTE4001 Case Study 2
+#
+#  Used by the patched slam_gmapping node (src/slam_gmapping). Every value is a
+#  ROS 2 parameter, so it can also be overridden on the command line:
+#     ros2 launch tb4_gmapping_nav gmapping.launch.py particles:=80   (see launch file)
+#
+#  !! Humble parameters are strictly typed: write doubles WITH a decimal point
+#     (e.g. xmin: -15.0, not -15), otherwise the node refuses to start.
+#
+#  Notation below follows Grisetti, Stachniss & Burgard, "Improved Techniques for
+#  Grid Mapping With Rao-Blackwellized Particle Filters", IEEE T-RO 2007:
+#     posterior  p(x_{1:t}, m | z_{1:t}, u_{1:t-1})
+#              = p(m | x_{1:t}, z_{1:t}) * p(x_{1:t} | z_{1:t}, u_{1:t-1})
+#                 \__ mapping, per particle_/  \__ particle filter over trajectories_/
+# =============================================================================
+slam_gmapping:
+  ros__parameters:
+    use_sim_time: true
+
+    # ---------------------------------------------------------------- frames / IO
+    base_frame: "base_link"        # robot body frame (TB4: base_link)
+    odom_frame: "odom"             # frame of the odometry u_t (wheel odom from Create3 / Gazebo diff-drive)
+    map_frame: "map"               # GMapping publishes TF map->odom = correction of odometry drift
+    transform_publish_period: 0.05 # [s] how often map->odom is broadcast (20 Hz)
+    tf_delay: 0.05                 # [s] future-date map->odom so Nav2 can look it up at the newest scan time
+    map_update_interval: 1.0       # [s] min. time between re-rendering /map from the best particle
+    throttle_scans: 1              # process every N-th scan (1 = all)
+    publish_particles: true        # publish ~/particles (PoseArray) to visualise the RBPF in RViz
+
+    # ------------------------------------------- laser / observation model z_t
+    # TB4 RPLIDAR A1: range_max = 12 m. Beams with no return (inf) are converted to range_max.
+    maxRange: 12.5     # [m] r_max. > sensor range_max so "no-return" beams are kept and clear free space
+    maxUrange: 10.0    # [m] usable range: beams longer than this only clear free cells, never mark hits
+    sigma: 0.05        # [m] std. dev. of the beam end-point likelihood used by the scan matcher
+    kernelSize: 1      # [cells] search window when looking for the nearest occupied cell to a beam end-point
+    lskip: 0           # use every (lskip+1)-th beam in the likelihood
+    lsigma: 0.075      # [m] std. dev. of beam likelihood when computing particle weights
+    ogain: 3.0         # gain smoothing the likelihood -> weight (reduces particle depletion)
+    minimumScore: 0.0  # scan-match score below which the match is rejected and pure odometry is used
+                       #   (raise to ~50 in long featureless corridors to avoid "jumps")
+
+    # ------------------------------------------ scan matcher (hill climbing optimiser)
+    # Finds x_t* = argmax_x p(z_t | m_{t-1}, x) starting from the odometry prediction x_t'
+    lstep: 0.05        # [m]   initial translational step
+    astep: 0.05        # [rad] initial rotational step
+    iterations: 5      # number of step-halving refinements
+
+    # ------------------------------------------- motion model p(x_t | x_{t-1}, u_{t-1})
+    # Gaussian noise added to the odometry increment (dx, dy, dtheta) of each particle
+    # (openslam_gmapping/gridfastslam/motionmodel.cpp: drawFromMotion)
+    srr: 0.1   # [m/m]    translation noise per metre travelled       (~ alpha_3 in Thrun's model)
+    srt: 0.2   # [rad/m]  rotation noise per metre travelled          (~ alpha_2)
+    str: 0.1   # [m/rad]  translation noise per radian rotated        (~ alpha_4)
+    stt: 0.2   # [rad/rad] rotation noise per radian rotated          (~ alpha_1)
+
+    # ------------------------------------------------- particle filter update policy
+    particles: 50            # N, number of particles (= candidate trajectories + maps)
+    linearUpdate: 0.2        # [m]   process a scan after travelling this far (TB4 is slow, small rooms)
+    angularUpdate: 0.25      # [rad] ... or after rotating this much
+    temporalUpdate: -1.0     # [s]   ... or after this time (negative = disabled; avoids degrading while parked)
+    resampleThreshold: 0.5   # selective resampling: resample only when N_eff < threshold * N
+                             #   N_eff = 1 / sum_i (w~_i)^2   (normalised weights w~)
+
+    # Sampling around the scan-matched pose to approximate the improved proposal
+    # p(x_t | m_{t-1}, x_{t-1}, z_t, u_{t-1})  ~  N(mu_t, Sigma_t)  (the "improved proposal" of Grisetti 2007)
+    # NOTE: in openslam_gmapping these are only used by ScanMatcher::likelihood(), which the
+    # live pipeline never calls. GridSlamProcessor::scanMatch() instead moves each particle to
+    # the hill-climbing optimum and weights it with likelihoodAndScore(). Changing them has
+    # no effect - kept only for completeness (see docs/CODE_MAP.md).
+    llsamplerange: 0.01   # [m]   linear sampling range
+    llsamplestep: 0.01    # [m]   linear sampling step
+    lasamplerange: 0.005  # [rad] angular sampling range
+    lasamplestep: 0.005   # [rad] angular sampling step
+
+    # ---------------------------------------------------------------- occupancy map m
+    delta: 0.05        # [m/cell] map resolution (same as the Prac 4/6 maps)
+    xmin: -15.0        # [m] initial map extent (grows automatically when exceeded)
+    ymin: -15.0
+    xmax: 15.0
+    ymax: 15.0
+    occ_thresh: 0.25   # cells with hit-ratio > occ_thresh are published as occupied (100)

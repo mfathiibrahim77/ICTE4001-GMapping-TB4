@@ -1,0 +1,463 @@
+diff --git a/openslam_gmapping/include/gmapping/gridfastslam/gridslamprocessor.h b/openslam_gmapping/include/gmapping/gridfastslam/gridslamprocessor.h
+index 9a859fb..f9ed8f5 100644
+--- a/openslam_gmapping/include/gmapping/gridfastslam/gridslamprocessor.h
++++ b/openslam_gmapping/include/gmapping/gridfastslam/gridslamprocessor.h
+@@ -170,7 +170,10 @@ namespace GMapping {
+     std::ostream& infoStream();
+     /**@returns the particles*/
+     inline const ParticleVector& getParticles() const {return m_particles; }
+-    
++    /**[ICTE4001] normalised particle weights computed by the last normalize() call
++       (Particle::weight holds the accumulated LOG-likelihood, not a probability)*/
++    inline const std::vector<double>& getWeights() const {return m_weights; }
++
+     inline const std::vector<unsigned int>& getIndexes() const{return m_indexes; }
+     int getBestParticleIndex() const;
+     //callbacks
+diff --git a/slam_gmapping/CMakeLists.txt b/slam_gmapping/CMakeLists.txt
+index d0115c0..bc1eae1 100644
+--- a/slam_gmapping/CMakeLists.txt
++++ b/slam_gmapping/CMakeLists.txt
+@@ -6,16 +6,15 @@ if(NOT CMAKE_C_STANDARD)
+   set(CMAKE_C_STANDARD 99)
+ endif()
+ 
+-# Default to C++14
++# [ICTE4001] ROS 2 Humble's rclcpp headers require C++17 (upstream used C++14)
+ if(NOT CMAKE_CXX_STANDARD)
+-  set(CMAKE_CXX_STANDARD 14)
++  set(CMAKE_CXX_STANDARD 17)
+ endif()
+ 
+ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+   add_compile_options(-Wall -Wextra -Wpedantic)
+ endif()
+-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld -Wl,--disable-new-dtags")
+-message(${CMAKE_SHARED_LINKER_FLAGS})
++# [ICTE4001] removed upstream "-fuse-ld=lld": the lld linker is not installed on a default Ubuntu/ROS image
+ # find dependencies
+ find_package(ament_cmake REQUIRED)
+ find_package(std_msgs REQUIRED)
+@@ -26,6 +25,7 @@ find_package(tf2_geometry_msgs REQUIRED)
+ find_package(message_filters REQUIRED)
+ find_package(rclcpp REQUIRED)
+ find_package(sensor_msgs REQUIRED)
++find_package(geometry_msgs REQUIRED)
+ find_package(visualization_msgs REQUIRED)
+ find_package(openslam_gmapping REQUIRED)
+ 
+@@ -51,6 +51,8 @@ ament_target_dependencies(slam_gmapping
+         message_filters
+         sensor_msgs
+         nav_msgs
++        geometry_msgs
++        std_msgs
+         tf2_geometry_msgs
+         openslam_gmapping)
+ 
+diff --git a/slam_gmapping/include/slam_gmapping/slam_gmapping.h b/slam_gmapping/include/slam_gmapping/slam_gmapping.h
+index 1ee2e5c..413d245 100644
+--- a/slam_gmapping/include/slam_gmapping/slam_gmapping.h
++++ b/slam_gmapping/include/slam_gmapping/slam_gmapping.h
+@@ -35,7 +35,8 @@
+ #include "geometry_msgs/msg/pose.hpp"
+ #include "geometry_msgs/msg/pose_stamped.hpp"
+ #include "geometry_msgs/msg/transform_stamped.hpp"
+-#include "tf2_geometry_msgs/tf2_geometry_msgs.h"
++#include "geometry_msgs/msg/pose_array.hpp"
++#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+ #include "tf2_ros/transform_listener.h"
+ #include "tf2_ros/transform_broadcaster.h"
+ #include "tf2/utils.h"
+@@ -61,8 +62,12 @@ public:
+ private:
+     rclcpp::Node::SharedPtr node_;
+     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr entropy_publisher_;
++    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr neff_publisher_;  // [ICTE4001]
+     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr sst_;
+     rclcpp::Publisher<nav_msgs::msg::MapMetaData>::SharedPtr sstm_;
++    // [ICTE4001] particle cloud (pose of every particle) for visualising the RBPF in RViz
++    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr particles_pub_;
++    bool publish_particles_;
+ 
+     std::shared_ptr<tf2_ros::Buffer> buffer_;
+     std::shared_ptr<tf2_ros::TransformListener> tfl_;
+@@ -90,6 +95,9 @@ private:
+     nav_msgs::msg::OccupancyGrid map_;
+ 
+     tf2::Duration map_update_interval_;
++    // [ICTE4001] was a local variable inside laserCallback(), so it was reset on every
++    // scan and the map was regenerated every time. Kept as a member now.
++    tf2::TimePoint last_map_update_;
+     tf2::Transform map_to_odom_;
+     std::mutex map_to_odom_mutex_;
+     std::mutex map_mutex_;
+@@ -105,6 +113,7 @@ private:
+     std::string odom_frame_;
+ 
+     void updateMap(sensor_msgs::msg::LaserScan::ConstSharedPtr scan);
++    void publishParticles(const rclcpp::Time & stamp);
+     bool getOdomPose(GMapping::OrientedPoint& gmap_pose, const rclcpp::Time& t);
+     bool initMapper(sensor_msgs::msg::LaserScan::ConstSharedPtr scan);
+     bool addScan(sensor_msgs::msg::LaserScan::ConstSharedPtr scan, GMapping::OrientedPoint& gmap_pose);
+@@ -113,7 +122,6 @@ private:
+     // Parameters used by GMapping
+     double maxRange_;
+     double maxUrange_;
+-    double maxrange_;
+     double minimum_score_;
+     double sigma_;
+     int kernelSize_;
+diff --git a/slam_gmapping/launch/slam_gmapping.launch.py b/slam_gmapping/launch/slam_gmapping.launch.py
+index 0f99610..b8dab73 100644
+--- a/slam_gmapping/launch/slam_gmapping.launch.py
++++ b/slam_gmapping/launch/slam_gmapping.launch.py
+@@ -1,12 +1,18 @@
++# [ICTE4001] upstream used the pre-Foxy "node_executable" argument, which fails on Humble.
+ from launch import LaunchDescription
+-from launch.substitutions import EnvironmentVariable
+-import launch.actions
+-import launch_ros.actions
++from launch.actions import DeclareLaunchArgument
++from launch.substitutions import LaunchConfiguration
++from launch_ros.actions import Node
+ 
+ 
+ def generate_launch_description():
+-    use_sim_time = launch.substitutions.LaunchConfiguration('use_sim_time', default='true')
++    use_sim_time = LaunchConfiguration('use_sim_time')
+     return LaunchDescription([
+-        launch_ros.actions.Node(
+-            package='slam_gmapping', node_executable='slam_gmapping', output='screen', parameters=[{'use_sim_time':use_sim_time}]),
++        DeclareLaunchArgument('use_sim_time', default_value='true'),
++        Node(
++            package='slam_gmapping',
++            executable='slam_gmapping',
++            name='slam_gmapping',
++            output='screen',
++            parameters=[{'use_sim_time': use_sim_time}]),
+     ])
+diff --git a/slam_gmapping/package.xml b/slam_gmapping/package.xml
+index 66e0ac7..0a1c33b 100644
+--- a/slam_gmapping/package.xml
++++ b/slam_gmapping/package.xml
+@@ -24,6 +24,7 @@
+     <depend>message_filters</depend>
+     <depend>rclcpp</depend>
+     <depend>sensor_msgs</depend>
++    <depend>geometry_msgs</depend>
+     <depend>visualization_msgs</depend>
+     <depend>openslam_gmapping</depend>
+ 
+diff --git a/slam_gmapping/src/slam_gmapping.cpp b/slam_gmapping/src/slam_gmapping.cpp
+index 8500f8e..dfb941d 100644
+--- a/slam_gmapping/src/slam_gmapping.cpp
++++ b/slam_gmapping/src/slam_gmapping.cpp
+@@ -25,6 +25,9 @@
+ 
+ #include "tf2_ros/create_timer_ros.h"
+ 
++#include <algorithm>
++#include <cmath>
++
+ #define MAP_IDX(sx, i, j) ((sx) * (j) + (i))
+ 
+ using std::placeholders::_1;
+@@ -58,49 +61,86 @@ void SlamGmapping::init() {
+     got_first_scan_ = false;
+     got_map_ = false;
+ 
+-    throttle_scans_ = 1;
+-    base_frame_ = "base_link";
+-    map_frame_ = "map";
+-    odom_frame_ = "odom";
+-    transform_publish_period_ = 0.05;
+-
+-    map_update_interval_ = tf2::durationFromSec(0.5);
+-    maxUrange_ = 80.0;  maxRange_ = 0.0;
+-    minimum_score_ = 0;
+-    sigma_ = 0.05;
+-    kernelSize_ = 1;
+-    lstep_ = 0.05;
+-    astep_ = 0.05;
+-    iterations_ = 5;
+-    lsigma_ = 0.075;
+-    ogain_ = 3.0;
+-    lskip_ = 0;
+-    srr_ = 0.1;
+-    srt_ = 0.2;
+-    str_ = 0.1;
+-    stt_ = 0.2;
+-    linearUpdate_ = 1.0;
+-    angularUpdate_ = 0.5;
+-    temporalUpdate_ = 1.0;
+-    resampleThreshold_ = 0.5;
+-    particles_ = 30;
+-    xmin_ = -10.0;
+-    ymin_ = -10.0;
+-    xmax_ = 10.0;
+-    ymax_ = 10.0;
+-    delta_ = 0.05;
+-    occ_thresh_ = 0.25;
+-    llsamplerange_ = 0.01;
+-    llsamplestep_ = 0.01;
+-    lasamplerange_ = 0.005;
+-    lasamplestep_ = 0.005;
+-    tf_delay_ = transform_publish_period_;
++    // [ICTE4001] All parameters were hard-coded in the upstream ROS 2 port, so a YAML
++    // file had no effect. They are now declared as ROS 2 parameters (same names as the
++    // original ROS 1 gmapping wrapper); the defaults below are the upstream values.
++    // See tb4_gmapping_nav/config/gmapping.yaml for the meaning of each one.
++
++    // --- frames / timing ---
++    throttle_scans_ = this->declare_parameter<int>("throttle_scans", 1);
++    if (throttle_scans_ < 1) throttle_scans_ = 1;
++    base_frame_ = this->declare_parameter<std::string>("base_frame", "base_link");
++    map_frame_ = this->declare_parameter<std::string>("map_frame", "map");
++    odom_frame_ = this->declare_parameter<std::string>("odom_frame", "odom");
++    transform_publish_period_ = this->declare_parameter<double>("transform_publish_period", 0.05);
++    tf_delay_ = this->declare_parameter<double>("tf_delay", transform_publish_period_);
++    map_update_interval_ = tf2::durationFromSec(
++        this->declare_parameter<double>("map_update_interval", 0.5));
++    publish_particles_ = this->declare_parameter<bool>("publish_particles", true);
++
++    // --- laser / scan-matcher (likelihood field + hill-climbing optimiser) ---
++    // maxRange / maxUrange <= 0 means "take it from the LaserScan's range_max"
++    maxRange_ = this->declare_parameter<double>("maxRange", -1.0);
++    maxUrange_ = this->declare_parameter<double>("maxUrange", -1.0);
++    minimum_score_ = this->declare_parameter<double>("minimumScore", 0.0);
++    sigma_ = this->declare_parameter<double>("sigma", 0.05);
++    kernelSize_ = this->declare_parameter<int>("kernelSize", 1);
++    lstep_ = this->declare_parameter<double>("lstep", 0.05);
++    astep_ = this->declare_parameter<double>("astep", 0.05);
++    iterations_ = this->declare_parameter<int>("iterations", 5);
++    lsigma_ = this->declare_parameter<double>("lsigma", 0.075);
++    ogain_ = this->declare_parameter<double>("ogain", 3.0);
++    lskip_ = this->declare_parameter<int>("lskip", 0);
++
++    // --- odometry motion model noise ---
++    srr_ = this->declare_parameter<double>("srr", 0.1);
++    srt_ = this->declare_parameter<double>("srt", 0.2);
++    str_ = this->declare_parameter<double>("str", 0.1);
++    stt_ = this->declare_parameter<double>("stt", 0.2);
++
++    // --- filter update policy ---
++    linearUpdate_ = this->declare_parameter<double>("linearUpdate", 1.0);
++    angularUpdate_ = this->declare_parameter<double>("angularUpdate", 0.5);
++    temporalUpdate_ = this->declare_parameter<double>("temporalUpdate", 1.0);
++    resampleThreshold_ = this->declare_parameter<double>("resampleThreshold", 0.5);
++    particles_ = this->declare_parameter<int>("particles", 30);
++
++    // --- map ---
++    xmin_ = this->declare_parameter<double>("xmin", -10.0);
++    ymin_ = this->declare_parameter<double>("ymin", -10.0);
++    xmax_ = this->declare_parameter<double>("xmax", 10.0);
++    ymax_ = this->declare_parameter<double>("ymax", 10.0);
++    delta_ = this->declare_parameter<double>("delta", 0.05);
++    occ_thresh_ = this->declare_parameter<double>("occ_thresh", 0.25);
++
++    // --- likelihood sampling used when computing the proposal distribution ---
++    llsamplerange_ = this->declare_parameter<double>("llsamplerange", 0.01);
++    llsamplestep_ = this->declare_parameter<double>("llsamplestep", 0.01);
++    lasamplerange_ = this->declare_parameter<double>("lasamplerange", 0.005);
++    lasamplestep_ = this->declare_parameter<double>("lasamplestep", 0.005);
++
++    last_map_update_ = tf2::TimePointZero;
++
++    RCLCPP_INFO(this->get_logger(),
++        "GMapping params: particles=%d delta=%.3f srr=%.3f srt=%.3f str=%.3f stt=%.3f "
++        "linearUpdate=%.2f angularUpdate=%.2f resampleThreshold=%.2f",
++        particles_, delta_, srr_, srt_, str_, stt_, linearUpdate_, angularUpdate_, resampleThreshold_);
+ }
+ 
+ void SlamGmapping::startLiveSlam() {
+     entropy_publisher_ = this->create_publisher<std_msgs::msg::Float64>("entropy", rclcpp::SystemDefaultsQoS());
+-    sst_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("map", rclcpp::SystemDefaultsQoS());
+-    sstm_ = this->create_publisher<nav_msgs::msg::MapMetaData>("map_metadata", rclcpp::SystemDefaultsQoS());
++    neff_publisher_ = this->create_publisher<std_msgs::msg::Float64>("~/neff", rclcpp::SystemDefaultsQoS());
++    // [ICTE4001] The map is published "latched" (reliable + transient_local) so that late
++    // subscribers such as Nav2's global costmap static_layer, RViz and map_saver still
++    // receive the latest map. With the upstream SystemDefaultsQoS (volatile) Nav2 never
++    // got a map unless it happened to be subscribed before the next update.
++    auto map_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
++    sst_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("map", map_qos);
++    sstm_ = this->create_publisher<nav_msgs::msg::MapMetaData>("map_metadata", map_qos);
++    if (publish_particles_) {
++        particles_pub_ = this->create_publisher<geometry_msgs::msg::PoseArray>(
++            "~/particles", rclcpp::SensorDataQoS());
++    }
+     scan_filter_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::LaserScan>>
+             (node_, "scan", rclcpp::SensorDataQoS().get_rmw_qos_profile());
+ //    sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
+@@ -249,9 +289,16 @@ bool SlamGmapping::initMapper(const sensor_msgs::msg::LaserScan::ConstSharedPtr
+ 
+     GMapping::OrientedPoint gmap_pose(0, 0, 0);
+ 
+-    // setting maxRange and maxUrange here so we can set a reasonable default
+-    maxRange_ = scan->range_max - 0.01;
+-    maxUrange_ = maxRange_;
++    // [ICTE4001] Upstream always overwrote both values with the scan's range_max, ignoring
++    // configuration. Like the ROS 1 wrapper, only fall back to range_max when unset (<= 0).
++    // Setting maxRange slightly ABOVE the sensor's range_max (and maxUrange below it) makes
++    // "no return" beams clear free space along the ray instead of being discarded.
++    if (maxRange_ <= 0.0)
++        maxRange_ = scan->range_max - 0.01;
++    if (maxUrange_ <= 0.0 || maxUrange_ > maxRange_)
++        maxUrange_ = std::min<double>(maxRange_, scan->range_max - 0.01);
++    RCLCPP_INFO(this->get_logger(), "Laser: %u beams, range_max=%.2f -> maxRange=%.2f maxUrange=%.2f",
++                gsp_laser_beam_count_, scan->range_max, maxRange_, maxUrange_);
+ 
+     // The laser must be called "FLASER".
+     // We pass in the absolute value of the computed angle increment, on the
+@@ -316,26 +363,31 @@ bool SlamGmapping::addScan(const sensor_msgs::msg::LaserScan::ConstSharedPtr sca
+         RCLCPP_DEBUG(this->get_logger(), "Inverting scan");
+         int num_ranges = static_cast<int>(scan->ranges.size());
+         for (int i = 0; i < num_ranges; i++) {
+-            // Must filter out short readings, because the mapper won't
+-            if (scan->ranges[num_ranges - i - 1] < scan->range_min)
++            // Must filter out short readings, because the mapper won't.
++            // [ICTE4001] +inf ("no return", as published by the TB4 RPLIDAR and the Gazebo
++            // lidar) is also mapped to range_max so it can be used to clear free space.
++            const float r = scan->ranges[num_ranges - i - 1];
++            if (r < scan->range_min || std::isinf(r))
+                 ranges_double[i] = (double) scan->range_max;
+             else
+-                ranges_double[i] = (double) scan->ranges[num_ranges - i - 1];
++                ranges_double[i] = (double) r;
+         }
+     } else {
+         for (unsigned int i = 0; i < scan->ranges.size(); i++) {
+-            // Must filter out short readings, because the mapper won't
+-            if (scan->ranges[i] < scan->range_min)
++            const float r = scan->ranges[i];
++            if (r < scan->range_min || std::isinf(r))
+                 ranges_double[i] = (double) scan->range_max;
+             else
+-                ranges_double[i] = (double) scan->ranges[i];
++                ranges_double[i] = (double) r;
+         }
+     }
+ 
+     GMapping::RangeReading reading(static_cast<unsigned int>(scan->ranges.size()),
+                                    ranges_double,
+                                    gsp_laser_,
+-                                   scan->header.stamp.sec);
++                                   // [ICTE4001] upstream passed stamp.sec (whole seconds),
++                                   // which quantised temporalUpdate to 1 s steps
++                                   rclcpp::Time(scan->header.stamp).seconds());
+ 
+     // ...but it deep copies them in RangeReading constructor, so we don't
+     // need to keep our array around.
+@@ -354,8 +406,6 @@ void SlamGmapping::laserCallback(sensor_msgs::msg::LaserScan::ConstSharedPtr sca
+     if ((laser_count_ % throttle_scans_) != 0)
+         return;
+ 
+-    tf2::TimePoint last_map_update = tf2::TimePointZero;
+-
+     // We can't initialize the mapper until we've got the first scan
+     if(!got_first_scan_)
+     {
+@@ -380,27 +430,61 @@ void SlamGmapping::laserCallback(sensor_msgs::msg::LaserScan::ConstSharedPtr sca
+         map_to_odom_ = (odom_to_laser * laser_to_map).inverse();
+         map_to_odom_mutex_.unlock();
+ 
++        if (publish_particles_)
++            publishParticles(scan->header.stamp);
++
++        // [ICTE4001] filter diagnostics after every filter update (was: only at map updates)
++        if (!gsp_->getWeights().empty()) {
++            std_msgs::msg::Float64 msg;
++            msg.data = computePoseEntropy();
++            entropy_publisher_->publish(msg);
++            msg.data = gsp_->getneff();   // N_eff = 1 / sum(w~_i^2), drives selective resampling
++            neff_publisher_->publish(msg);
++        }
++
+         tf2::TimePoint timestamp = tf2_ros::fromMsg(scan->header.stamp);
+-        if(!got_map_ || (timestamp - last_map_update) > map_update_interval_)
++        if(!got_map_ || (timestamp - last_map_update_) > map_update_interval_)
+         {
+             updateMap(scan);
+-            last_map_update = tf2_ros::fromMsg(scan->header.stamp);
++            last_map_update_ = timestamp;
+         }
+     }
+ }
+ 
+-double SlamGmapping::computePoseEntropy()
++// [ICTE4001] Publish every particle's (laser) pose in the map frame so the
++// Rao-Blackwellised particle filter can be visualised in RViz (PoseArray display).
++void SlamGmapping::publishParticles(const rclcpp::Time & stamp)
+ {
+-    double weight_total=0.0;
+-    for (const auto &it : gsp_->getParticles()) {
+-        weight_total += it.weight;
++    if (!particles_pub_)
++        return;
++    geometry_msgs::msg::PoseArray cloud;
++    cloud.header.frame_id = map_frame_;
++    cloud.header.stamp = stamp;
++    const auto & particles = gsp_->getParticles();
++    cloud.poses.reserve(particles.size());
++    for (const auto & p : particles) {
++        geometry_msgs::msg::Pose pose;
++        pose.position.x = p.pose.x;
++        pose.position.y = p.pose.y;
++        tf2::Quaternion q;
++        q.setRPY(0, 0, p.pose.theta);
++        pose.orientation = tf2::toMsg(q);
++        cloud.poses.push_back(pose);
+     }
++    particles_pub_->publish(cloud);
++}
++
++// [ICTE4001] Upstream (and the original ROS 1 wrapper) computed this from Particle::weight,
++// which holds the accumulated LOG-likelihood, not a probability. The result was meaningless
++// (~ln(N) almost always). Use the normalised weights w~_i of the last normalize() call.
++double SlamGmapping::computePoseEntropy()
++{
+     double entropy = 0.0;
+-    for (const auto &it : gsp_->getParticles()) {
+-        if(it.weight/weight_total > 0.0)
+-            entropy += it.weight/weight_total * log(it.weight/weight_total);
++    for (double w : gsp_->getWeights()) {
++        if (w > 0.0)
++            entropy -= w * std::log(w);
+     }
+-    return -entropy;
++    return entropy;   // 0 = one particle dominates, ln(N) = all particles equally likely
+ }
+ 
+ void SlamGmapping::updateMap(const sensor_msgs::msg::LaserScan::ConstSharedPtr scan)
+@@ -418,10 +502,6 @@ void SlamGmapping::updateMap(const sensor_msgs::msg::LaserScan::ConstSharedPtr s
+ 
+     GMapping::GridSlamProcessor::Particle best =
+             gsp_->getParticles()[gsp_->getBestParticleIndex()];
+-    std_msgs::msg::Float64 entropy;
+-    entropy.data = computePoseEntropy();
+-    if(entropy.data > 0.0)
+-        entropy_publisher_->publish(entropy);
+ 
+     if(!got_map_) {
+         map_.info.resolution = static_cast<nav_msgs::msg::MapMetaData::_resolution_type>(delta_);
+@@ -515,8 +595,9 @@ void SlamGmapping::updateMap(const sensor_msgs::msg::LaserScan::ConstSharedPtr s
+ void SlamGmapping::publishTransform()
+ {
+     map_to_odom_mutex_.lock();
+-    rclcpp::Time tf_expiration = get_clock()->now() + rclcpp::Duration(
+-            static_cast<int32_t>(static_cast<rcl_duration_value_t>(tf_delay_)), 0);
++    // [ICTE4001] upstream cast tf_delay (0.05 s) to whole seconds, i.e. always 0.
++    // Future-dating map->odom slightly lets consumers look it up at the latest scan time.
++    rclcpp::Time tf_expiration = get_clock()->now() + rclcpp::Duration::from_seconds(tf_delay_);
+     geometry_msgs::msg::TransformStamped transform;
+     transform.header.frame_id = map_frame_;
+     transform.header.stamp = tf_expiration;
+@@ -526,7 +607,7 @@ void SlamGmapping::publishTransform()
+         tfB_->sendTransform(transform);
+     }
+     catch (tf2::LookupException& te){
+-        RCLCPP_INFO(this->get_logger(), te.what());
++        RCLCPP_INFO(this->get_logger(), "%s", te.what());
+     }
+     map_to_odom_mutex_.unlock();
+ }
