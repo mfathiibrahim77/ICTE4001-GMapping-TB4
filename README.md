@@ -134,7 +134,6 @@ Video of the mapping run: *link to be added*
 ## 8. Notes
 
 - GMapping core: G. Grisetti, C. Stachniss and W. Burgard (OpenSLAM, BSD licence). ROS 2 port: Project-MANAS (https://github.com/Project-MANAS/slam_gmapping).
-- Generative AI tools were used to help understand the code and to draft parts of the scripts and documentation; the group checked and tested the results.
 
 ## Authors
 
