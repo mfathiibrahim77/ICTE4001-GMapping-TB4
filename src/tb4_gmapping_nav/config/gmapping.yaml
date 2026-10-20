@@ -25,7 +25,7 @@ slam_gmapping:
     map_frame: "map"               # GMapping publishes TF map->odom = correction of odometry drift
     transform_publish_period: 0.05 # [s] how often map->odom is broadcast (20 Hz)
     tf_delay: 0.05                 # [s] future-date map->odom so Nav2 can look it up at the newest scan time
-    map_update_interval: 1.0       # [s] min. time between re-rendering /map from the best particle
+    map_update_interval: 5.0       # [s] min. time between re-rendering /map (1.0 stalled after ~1700 updates on the VDI)
     throttle_scans: 1              # process every N-th scan (1 = all)
     publish_particles: true        # publish ~/particles (PoseArray) to visualise the RBPF in RViz
 

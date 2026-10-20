@@ -10,6 +10,7 @@ install(PROGRAMS
   scripts/slam_eval_recorder.py
   scripts/drive_waypoints.py
   scripts/analyse_run.py
+  scripts/map_compare.py
   DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
