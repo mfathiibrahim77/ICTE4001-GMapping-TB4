@@ -6,3 +6,4 @@ __pycache__/
 *.bag
 *.db3
 *.mp4
+!results/videos/*.mp4
