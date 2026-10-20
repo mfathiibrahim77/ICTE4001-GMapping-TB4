@@ -92,7 +92,12 @@ map compared to the prac 6 office map (`results/maps/office_ICTE4001_sim`):
 
 to redo it: `python3 src/tb4_gmapping_nav/scripts/map_compare.py --ref results/maps/office_ICTE4001_sim.yaml --maps results/maps/e1_teleop_map.yaml results/maps/e4_nav2_map.yaml`
 
-videos are in `results/videos/`: `e1_teleop_mapping.mp4`, `e1_loop_closure_clip.mp4`, `e4_nav2_goals.mp4` (sped up 3-4x).
+videos are in `results/videos/`:
+
+- `presentation_video.mp4` - gazebo world, loop closure clip, nav2 run and the map vs reference, with captions
+- `e4_nav2_goals.mp4` - gmapping + nav2, 5/5 goals (3-4x speed)
+- `e1_loop_closure_clip.mp4` - back at the start, walls line up (~37x speed)
+- `e1_teleop_mapping.mp4` - the whole teleop mapping run (16x speed)
 
 ## parameter comparison
 
