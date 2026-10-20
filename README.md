@@ -18,24 +18,25 @@ cd ~/gmapping_ws && colcon build && source install/setup.bash
 
 every new terminal:
 ```bash
-source /opt/ros/humble/setup.bash && source ~/turtlebot_virtual_lab/install/setup.bash && source ~/gmapping_ws/install/setup.bash
+source /opt/ros/humble/setup.bash
+source ~/turtlebot_virtual_lab/install/setup.bash
+source ~/gmapping_ws/install/setup.bash
 ```
 
 ## if the sim is slow (VDI)
 
-run this once, it lowers the sim sensor rates (lidar 62 -> 10 Hz, camera 30 -> 1 Hz, cliff/IR 62 -> 5 Hz).
+run this once. it lowers the sim sensor rates (lidar 62 -> 10 Hz, camera 30 -> 1 Hz, cliff/IR 62 -> 5 Hz).
 for us it went from under 10% real time to around 50%.
 
 ```bash
 bash scripts/fast_sim_overlay.sh
 ```
-then in the simulator terminal also do `source ~/tb4_fast_overlay/setup.bash`
+then in the simulator terminal also run `source ~/tb4_fast_overlay/setup.bash` before launching.
 
 ## run (one terminal each)
 
 ```bash
 # 1. sim
-export IGN_IP=127.0.0.1; export IGN_PARTITION=$USER
 ros2 launch turtlebot4_ignition_bringup turtlebot4_ignition.launch.py world:=office_world
 
 # 2. undock
@@ -51,7 +52,7 @@ ros2 launch nav2_bringup navigation_launch.py use_sim_time:=true params_file:=$(
 ros2 run nav2_map_server map_saver_cli -f ~/gmapping_map --ros-args -p save_map_timeout:=20.0
 ```
 
-then just use **2D Goal Pose** in rviz. you can also drive with teleop instead of step 4:
+then use **2D Goal Pose** in rviz. you can also drive with teleop instead of step 4:
 `ros2 run teleop_twist_keyboard teleop_twist_keyboard`
 
 ## what's in here
@@ -69,7 +70,7 @@ then just use **2D Goal Pose** in rviz. you can also drive with teleop instead o
 | run | what | result |
 | --- | --- | --- |
 | E1 | teleop mapping, loop back to start | clean map, loop closed, no doubled walls |
-| E2 | gmapping + nav2, normal sim | paths planned but goals failed, sim too slow (tf too late) |
+| E2 | gmapping + nav2, normal sim | paths planned but goals failed (sim too slow) |
 | E3 | saved map + amcl + nav2, normal sim | same, paths ok but goals failed |
 | E4 | gmapping + nav2 after the speed up | 5/5 goals reached, map built only with nav2 goals |
 
@@ -82,23 +83,31 @@ map compared to the prac 6 office map (`results/maps/office_ICTE4001_sim`):
 
 to redo it: `python3 src/tb4_gmapping_nav/scripts/map_compare.py --ref results/maps/office_ICTE4001_sim.yaml --maps results/maps/e1_teleop_map.yaml results/maps/e4_nav2_map.yaml`
 
-in E4 gmapping stopped updating after ~1670 updates. each map update redraws every scan from the whole run so it gets slower over time, and rviz was eating the cpu. we changed `map_update_interval` from 1.0 to 5.0 to fix it.
-
 videos: _links to be added_
 
-## problems we had
+## what didn't work and why
+
+**nav2 goals kept failing at first (E2, E3).**
+the VDI has no GPU so gazebo was running at under 10% real time. the transforms (map -> odom) were arriving 20 to 140 s late, so nav2's controller threw the plans away ("transform data too old"). it wasn't gmapping's fault because the same thing happened with amcl. lowering the sensor rates with `fast_sim_overlay.sh` fixed it. the lidar going to 10 Hz doesn't hurt gmapping since the real RPLIDAR A1 is 5.5 to 10 Hz anyway, and the camera, cliff and IR sensors aren't used by gmapping or nav2.
+
+**gmapping stopped updating the map halfway through E4.**
+every map update redraws every scan from the whole run (`updateMap()`), so it gets slower the longer you go. with it set to update every 1 s, and rviz using a lot of cpu, it fell behind after ~1670 updates and new rooms stayed grey. we changed `map_update_interval` to 5.0 s in `config/gmapping.yaml`. also untick the particles and costmaps in rviz if it's slow.
+
+**gazebo got stuck on "requesting list of world names".**
+our `turtlebot_virtual_lab` folder only had `src` in it after unzipping again, so office_world couldn't be found. building it again (`colcon build`) fixed it.
+
+**nav2 said it couldn't find odom -> base_link.**
+we closed the gazebo window by accident, which stops the whole sim. minimise it, don't close it.
+
+## other problems
 
 | problem | fix |
 | --- | --- |
-| gazebo stuck on "requesting list of world names" | build `turtlebot_virtual_lab` (only `src` = not built), `pkill -9 -f ruby`, use the IGN exports |
-| nav2 "transform data too old" / goal failed | sim too slow, use the speed up |
-| nav2 can't find odom -> base_link | sim closed or not started. minimise gazebo, don't close it |
-| gmapping stops printing "update frame" | save the map, restart gmapping, untick particles/costmaps in rviz |
-| robot jumps around | two gmapping nodes running, check `ros2 node list` |
-| robot won't move after hitting something | create3 safety reflex, drive forward/turn away |
-| map is rotated | normal, map starts where the robot starts |
+| robot jumps around in rviz | two gmapping nodes running, check `ros2 node list` |
+| robot won't move after hitting something | create3 safety reflex, drive forward or turn away |
+| map is rotated compared to gazebo | normal, the map starts where the robot starts |
 | map_saver fails | add `-p save_map_timeout:=20.0` |
-| amcl "base_footprint does not exist" | use `config/amcl_sim.yaml` |
+| amcl says "base_footprint does not exist" | use `config/amcl_sim.yaml` |
 
 ## limitations
 
