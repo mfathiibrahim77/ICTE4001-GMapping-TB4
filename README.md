@@ -5,6 +5,15 @@ GMapping builds the map and gives Nav2 the robot pose, so no AMCL needed while m
 
 ![architecture](figures/architecture.png)
 
+| | |
+| --- | --- |
+| OS | Ubuntu 22.04 |
+| ROS 2 | Humble |
+| sim | Gazebo Fortress, `office_world` from `turtlebot_virtual_lab` |
+| robot | simulated TurtleBot4 (standard) |
+| nav | Nav2, NavFn planner, DWB controller |
+| PC | Curtin VDI remote desktop, no GPU |
+
 ## setup
 
 you need the unit's `turtlebot_virtual_lab` workspace built first (that's where office_world is).
@@ -83,7 +92,19 @@ map compared to the prac 6 office map (`results/maps/office_ICTE4001_sim`):
 
 to redo it: `python3 src/tb4_gmapping_nav/scripts/map_compare.py --ref results/maps/office_ICTE4001_sim.yaml --maps results/maps/e1_teleop_map.yaml results/maps/e4_nav2_map.yaml`
 
-videos: _links to be added_
+videos are in `results/videos/`: `e1_teleop_mapping.mp4`, `e1_loop_closure_clip.mp4`, `e4_nav2_goals.mp4` (sped up 3-4x).
+
+## parameter comparison
+
+two extra configs, each changes one thing from `gmapping.yaml`:
+
+- `src/tb4_gmapping_nav/config/gmapping_N15.yaml` - 15 particles instead of 50
+- `src/tb4_gmapping_nav/config/gmapping_delta010.yaml` - 0.10 m cells instead of 0.05 m
+
+run gmapping with one of them instead of step 3, drive the same route, save the map, then compare:
+```bash
+ros2 launch tb4_gmapping_nav gmapping.launch.py rviz:=true params_file:=$(ros2 pkg prefix tb4_gmapping_nav)/share/tb4_gmapping_nav/config/gmapping_N15.yaml
+```
 
 ## what didn't work and why
 
@@ -91,7 +112,7 @@ videos: _links to be added_
 the VDI has no GPU so gazebo was running at under 10% real time. the transforms (map -> odom) were arriving 20 to 140 s late, so nav2's controller threw the plans away ("transform data too old"). it wasn't gmapping's fault because the same thing happened with amcl. lowering the sensor rates with `fast_sim_overlay.sh` fixed it. the lidar going to 10 Hz doesn't hurt gmapping since the real RPLIDAR A1 is 5.5 to 10 Hz anyway, and the camera, cliff and IR sensors aren't used by gmapping or nav2.
 
 **gmapping stopped updating the map halfway through E4.**
-every map update redraws every scan from the whole run (`updateMap()`), so it gets slower the longer you go. with it set to update every 1 s, and rviz using a lot of cpu, it fell behind after ~1670 updates and new rooms stayed grey. we changed `map_update_interval` to 5.0 s in `config/gmapping.yaml`. also untick the particles and costmaps in rviz if it's slow.
+every map update redraws every scan from the whole run (`updateMap()`), so it gets slower the longer you go. with it set to update every 1 s, and rviz using a lot of cpu, it fell behind after ~1670 updates and new rooms stayed grey. we changed `map_update_interval` to 5.0 s in `src/tb4_gmapping_nav/config/gmapping.yaml`. also untick the particles and costmaps in rviz if it's slow.
 
 **gazebo got stuck on "requesting list of world names".**
 our `turtlebot_virtual_lab` folder only had `src` in it after unzipping again, so office_world couldn't be found. building it again (`colcon build`) fixed it.
@@ -119,7 +140,3 @@ we closed the gazebo window by accident, which stops the whole sim. minimise it,
 ## credits
 
 gmapping by Grisetti, Stachniss and Burgard (OpenSLAM). ros2 port by Project-MANAS (https://github.com/Project-MANAS/slam_gmapping).
-
-## group
-
-ICTE4001 Group ___
